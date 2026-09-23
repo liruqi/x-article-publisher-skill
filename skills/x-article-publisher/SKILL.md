@@ -3,6 +3,41 @@ name: x-article-publisher
 description: |
   Publish Markdown articles to X (Twitter) Articles editor with proper formatting. Use when user wants to publish a Markdown file/URL to X Articles, or mentions "publish to X", "post article to Twitter", "X article", or wants help with X Premium article publishing. Handles cover image upload and converts Markdown to rich text automatically.
 ---
+> **WorkBuddy (Windows) environment notes**
+> - Python with all deps (Pillow / pywin32 / clip-util) is at
+>   `C:/Users/liruqi/.workbuddy-ai/binaries/python/envs/default/Scripts/python.exe`.
+>   Do **not** switch to a bare `python`.
+> - Browser automation is provided by **playwright-cli**, not Playwright MCP.
+> - `pkill` in the troubleshooting notes is macOS-only; on Windows use
+>   `taskkill /F /IM chrome.exe`.
+> - The skill never publishes — it only saves an X Articles **draft**.
+
+## Browser automation in WorkBuddy (playwright-cli mapping)
+
+| Original (Playwright MCP) | playwright-cli equivalent |
+|---|---|
+| `browser_navigate` | `playwright-cli open <url>` (or `goto`) |
+| `browser_snapshot` | `playwright-cli snapshot --filename=step.yaml` (writes a file) |
+| `browser_click ref` | `playwright-cli click e12` |
+| `browser_type` | `playwright-cli fill e3 "title"` |
+| `browser_press_key Meta+v` | `playwright-cli press Control+V` |
+| `browser_press_key End` | `playwright-cli press End` |
+| `browser_file_upload` | `playwright-cli upload /path.png` |
+| `browser_close` | `playwright-cli close` |
+
+Verified gotchas (2026-09-23):
+
+- **MUST use `--headed`.** Headless Chromium cannot read the OS clipboard, so
+  `Control+V` silently pastes nothing.
+- **Sessions survive between calls** in recent playwright-cli versions (there is
+  a daemon); use `playwright-cli -s=x-article ...` and verify with `list`.
+- **In `run-code`, keep the snippet on ONE line** — newlines in the argument
+  produce `SyntaxError: Unexpected token ')'`.
+- **From Python `subprocess`, call `playwright-cli.cmd`**, not the extension-less
+  launcher (which is a shell script → `WinError 193`).
+- `require` is **not** available inside `run-code`.
+- **`file://` URLs are blocked** — serve local files over `python -m http.server`.
+- Launch with `--persistent` so the X login survives between runs.
 
 # X Article Publisher
 
@@ -44,6 +79,48 @@ Convert Markdown table to PNG image:
 python table_to_image.py <input.md> <output.png> [--scale 2]
 ```
 Use when X Articles doesn't support native table rendering or for consistent styling.
+
+## Math / LaTeX (important)
+
+**X Articles renders math only through the editor's `Insert > LaTeX` dialog.**
+Typing `$$...$$` or any LaTeX source directly into the editor does nothing — it
+stays plain text (verified 2026-09-23). So never rely on `$...$` in the pasted HTML.
+
+`parse_markdown.py --math-mode` controls what happens to formulas:
+
+| mode | display `$$...$$` | inline `$...$` | use when |
+|---|---|---|---|
+| `latex` (default) | → `latex_blocks[]`, inserted via Insert > LaTeX (KaTeX-rendered) | → readable Unicode text | **default**, best fidelity |
+| `text` | → Unicode text | → Unicode text | no LaTeX dialog available |
+| `keep` | left verbatim | left verbatim | debugging only (renders as plain text) |
+| `image` | untouched | untouched | caller pre-rendered formulas to images |
+
+Because X throttles image uploads hard (~25 pasted images per article before
+pastes start failing), **`latex` is strongly preferred over rendering formulas
+to PNGs.** Converting 68 display equations to images does not work; inserting
+them as LaTeX blocks does.
+
+### Inserting the LaTeX blocks
+
+Each entry of `latex_blocks[]` carries `latex` + `block_index` + `after_text`.
+Insert them **from the highest `block_index` down**:
+
+```bash
+python scripts/insert_latex.py parsed.json --session x-article
+```
+
+Per formula it runs: click block → `End` → `Add Media` → `LaTeX` menuitem →
+fill expression → `Insert`.
+
+Manual equivalent: click the paragraph → press `End` → click **Add Media**
+(the toolbar button labelled *Insert*) → choose **LaTeX** → type the
+expression → click **Insert**.
+
+## Tables
+
+The Insert menu also has a native **Table** item, so Markdown tables can be
+inserted as real tables instead of being rendered to PNG by `table_to_image.py`.
+Prefer native tables when the table is simple.
 
 ## Pre-Processing (Optional)
 

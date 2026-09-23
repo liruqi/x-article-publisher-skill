@@ -74,6 +74,127 @@ def find_image_file(original_path: str, filename: str) -> tuple[str, bool]:
     return original_path, False
 
 
+# ---------------------------------------------------------------------------
+# Math (LaTeX) handling
+#
+# X Articles renders math ONLY through the editor's **Insert > LaTeX** dialog.
+# Typing `$$...$$` or any LaTeX source straight into the editor is ignored and
+# stays plain text (verified 2026-09-23). So:
+#   * display math ($$...$$) -> a `latex_blocks[]` entry, to be inserted through
+#     that dialog at its block_index position (rendered by KaTeX);
+#   * inline math ($...$) -> readable Unicode text, since there is no inline
+#     LaTeX affordance in the editor.
+# ---------------------------------------------------------------------------
+
+DISPLAY_MATH = re.compile(r'\$\$(.*?)\$\$', re.DOTALL)
+INLINE_MATH = re.compile(r'(?<!\$)\$(?!\$)([^\n$]+?)(?<!\$)\$(?!\$)')
+
+# Greek letters and symbols -> Unicode
+_SYMBOLS = {
+    'alpha': 'α', 'beta': 'β', 'gamma': 'γ', 'delta': 'δ', 'epsilon': 'ε',
+    'varepsilon': 'ε', 'zeta': 'ζ', 'eta': 'η', 'theta': 'θ', 'iota': 'ι',
+    'kappa': 'κ', 'lambda': 'λ', 'mu': 'μ', 'nu': 'ν', 'xi': 'ξ', 'pi': 'π',
+    'rho': 'ρ', 'sigma': 'σ', 'tau': 'τ', 'upsilon': 'υ', 'phi': 'φ',
+    'varphi': 'φ', 'chi': 'χ', 'psi': 'ψ', 'omega': 'ω',
+    'Gamma': 'Γ', 'Delta': 'Δ', 'Theta': 'Θ', 'Lambda': 'Λ', 'Xi': 'Ξ',
+    'Pi': 'Π', 'Sigma': 'Σ', 'Phi': 'Φ', 'Psi': 'Ψ', 'Omega': 'Ω',
+    'infty': '∞', 'partial': '∂', 'nabla': '∇', 'forall': '∀', 'exists': '∃',
+    'emptyset': '∅', 'in': '∈', 'notin': '∉', 'subset': '⊂', 'cup': '∪',
+    'cap': '∩', 'pm': '±', 'mp': '∓', 'times': '×', 'cdot': '·',
+    'div': '÷', 'neq': '≠', 'ne': '≠', 'leq': '≤', 'le': '≤', 'geq': '≥',
+    'ge': '≥', 'approx': '≈', 'equiv': '≡', 'sim': '∼', 'simeq': '≃',
+    'propto': '∝', 'to': '→', 'rightarrow': '→', 'Rightarrow': '⇒',
+    'leftarrow': '←', 'Leftarrow': '⇐', 'mapsto': '↦', 'ldots': '…',
+    'dots': '…', 'cdots': '⋯', 'prime': '′', 'angle': '∠', 'deg': '°',
+    'sum': '∑', 'prod': '∏', 'int': '∫', 'iint': '∬', 'oint': '∮',
+    'hbar': 'ℏ', 'ell': 'ℓ', 'Re': 'Re', 'Im': 'Im',
+}
+
+# Superscript / subscript character maps
+_SUP = str.maketrans('0123456789+-=()nist',
+                     '⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱˢᵗ')
+_SUB = str.maketrans('0123456789+-=()aehjkmnoprsxt',
+                     '₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₕⱼₖₘₙₒₚᵣₛₓₜ')
+
+
+def latex_to_text(expr: str) -> str:
+    """Best-effort conversion of inline LaTeX into readable Unicode text."""
+    s = expr.strip()
+    if not s:
+        return ''
+
+    # \left / \right and spacing commands
+    s = re.sub(r'\\(?:left|right|big|Big|bigg|Bigg)\b', '', s)
+    s = re.sub(r'\\[,;:! ]', ' ', s)
+
+    # \text{...} / \mathrm{...} -> contents
+    for _ in range(8):
+        new = re.sub(r'\\(?:text|mathrm|mathbf|operatorname)\s*\{([^{}]*)\}',
+                     r'\1', s)
+        if new == s:
+            break
+        s = new
+
+    # \frac -> a/b  (brace-less \frac12 form first)
+    s = re.sub(r'\\[tdc]?frac\s*(\d)\s*(\d)', r'\\frac{\1}{\2}', s)
+
+    def _frac(m):
+        a, b = m.group(1).strip(), m.group(2).strip()
+        return f'{a}/{b}' if len(a) == 1 and len(b) == 1 else f'({a})/({b})'
+
+    for _ in range(8):
+        new = re.sub(r'\\[tdc]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}', _frac, s)
+        if new == s:
+            break
+        s = new
+
+    # \sqrt -> √(...)
+    for _ in range(6):
+        new = re.sub(r'\\[tdc]?sqrt\s*\{([^{}]*)\}', r'√(\1)', s)
+        if new == s:
+            break
+        s = new
+
+    s = re.sub(r'\\binom\s*\{([^{}]*)\}\s*\{([^{}]*)\}', r'C(\1,\2)', s)
+
+    # superscripts / subscripts
+    s = re.sub(r'\^\s*\{([^{}]*)\}', lambda m: m.group(1).translate(_SUP), s)
+    s = re.sub(r'_\s*\{([^{}]*)\}', lambda m: m.group(1).translate(_SUB), s)
+    s = re.sub(r'\^\s*(\w)', lambda m: m.group(1).translate(_SUP), s)
+    s = re.sub(r'_\s*(\w)', lambda m: m.group(1).translate(_SUB), s)
+
+    # \hat{x} / \bar{x} / \tilde{x} / \vec{x} -> x
+    s = re.sub(r'\\(?:hat|bar|tilde|vec|dot)\s*\{([^{}]*)\}', r'\1', s)
+
+    # remaining known commands
+    def _cmd(m):
+        name = m.group(1)
+        return _SYMBOLS.get(name, name)
+
+    s = re.sub(r'\\([A-Za-z]+)', _cmd, s)
+
+    # drop escaped punctuation and leftover braces
+    s = re.sub(r'\\(?=[^A-Za-z])', '', s)
+    s = s.replace('{', '').replace('}', '')
+    s = re.sub(r'\s+', ' ', s)
+    return s.strip()
+
+
+def extract_display_math(markdown: str) -> tuple[str, list[str]]:
+    """Replace $$...$$ with ___LATEX_i___ placeholders.
+
+    Returns (markdown_with_placeholders, [latex_source, ...]).
+    """
+    found: list[str] = []
+
+    def _sub(m: re.Match) -> str:
+        idx = len(found)
+        found.append(m.group(1).strip())
+        return f'\n\n___LATEX_{idx}___\n\n'
+
+    return DISPLAY_MATH.sub(_sub, markdown), found
+
+
 def split_into_blocks(markdown: str) -> list[str]:
     """Split markdown into logical blocks (paragraphs, headers, quotes, code blocks, etc.)."""
     blocks = []
@@ -132,6 +253,14 @@ def split_into_blocks(markdown: str) -> list[str]:
             blocks.append(stripped)
             continue
 
+        # Standalone display-math placeholder is its own block
+        if re.match(r'^___LATEX_\d+___$', stripped):
+            if current_block:
+                blocks.append('\n'.join(current_block))
+                current_block = []
+            blocks.append(stripped)
+            continue
+
         # Image on its own line is its own block
         if re.match(r'^!\[.*\]\(.*\)$', stripped):
             if current_block:
@@ -152,18 +281,33 @@ def split_into_blocks(markdown: str) -> list[str]:
     return blocks
 
 
-def extract_images_and_dividers(markdown: str, base_path: Path) -> tuple[list[dict], list[dict], str, int]:
-    """Extract images and dividers with their block index positions.
+def extract_images_and_dividers(markdown: str, base_path: Path,
+                                latex_sources: list[str] | None = None
+                                ) -> tuple[list[dict], list[dict], list[dict], str, int]:
+    """Extract images, dividers and display-math blocks with their block index.
+
+    All three share one block-index sequence, so images and LaTeX blocks stay
+    correctly interleaved when they are inserted afterwards.
 
     Returns:
-        (image_list, divider_list, markdown_without_images_and_dividers, total_blocks)
+        (image_list, divider_list, latex_list, markdown_without_those, total_blocks)
     """
     blocks = split_into_blocks(markdown)
     images = []
     dividers = []
+    latex_blocks = []
     clean_blocks = []
 
     img_pattern = re.compile(r'^!\[([^\]]*)\]\(([^)]+)\)$')
+    latex_pattern = re.compile(r'^___LATEX_(\d+)___$')
+
+    def tail_text() -> str:
+        """Last line (<=80 chars) of the previous kept block, for positioning."""
+        if not clean_blocks:
+            return ""
+        prev = clean_blocks[-1].strip()
+        lines = [l for l in prev.split('\n') if l.strip()]
+        return lines[-1][:80] if lines else ""
 
     for i, block in enumerate(blocks):
         block_stripped = block.strip()
@@ -181,6 +325,18 @@ def extract_images_and_dividers(markdown: str, base_path: Path) -> tuple[list[di
                 "after_text": after_text
             })
             continue
+
+        latex_match = latex_pattern.match(block_stripped)
+        if latex_match and latex_sources is not None:
+            idx = int(latex_match.group(1))
+            if idx < len(latex_sources):
+                latex_blocks.append({
+                    "index": idx,
+                    "latex": latex_sources[idx],
+                    "block_index": len(clean_blocks),
+                    "after_text": tail_text()
+                })
+                continue
 
         match = img_pattern.match(block_stripped)
         if match:
@@ -215,7 +371,7 @@ def extract_images_and_dividers(markdown: str, base_path: Path) -> tuple[list[di
             clean_blocks.append(block)
 
     clean_markdown = '\n\n'.join(clean_blocks)
-    return images, dividers, clean_markdown, len(clean_blocks)
+    return images, dividers, latex_blocks, clean_markdown, len(clean_blocks)
 
 
 def extract_title(markdown: str) -> tuple[str, str]:
@@ -253,6 +409,47 @@ def extract_title(markdown: str) -> tuple[str, str]:
         markdown = '\n'.join(lines)
 
     return title, markdown
+
+
+_TAG_RE = re.compile(r'</?[A-Za-z][A-Za-z0-9]*(?:\s[^<>]*)?/?>')
+_ENTITY_RE = re.compile(r'&(?:[A-Za-z][A-Za-z0-9]{1,31}|#\d{1,7}|#[xX][0-9A-Fa-f]{1,6});')
+
+
+def escape_text_nodes(html: str) -> str:
+    """Escape `<` / bare `&` that live in *text*, leaving real tags intact.
+
+    Without this, mathematical prose such as `0<Re(s)<1` is emitted as a raw
+    `<`, which the browser then parses as a tag and silently deletes everything
+    up to the next `>`.
+    """
+
+    def fix(text: str) -> str:
+        if not text:
+            return text
+        out = []
+        i = 0
+        while i < len(text):
+            m = _ENTITY_RE.match(text, i)
+            if m:
+                out.append(text[i:m.end()])
+                i = m.end()
+                continue
+            if text[i] == '&':
+                out.append('&amp;')
+                i += 1
+                continue
+            out.append(text[i])
+            i += 1
+        return ''.join(out).replace('<', '&lt;')
+
+    result = []
+    pos = 0
+    for m in _TAG_RE.finditer(html):
+        result.append(fix(html[pos:m.start()]))
+        result.append(m.group(0))
+        pos = m.end()
+    result.append(fix(html[pos:]))
+    return ''.join(result)
 
 
 def markdown_to_html(markdown: str) -> str:
@@ -311,11 +508,19 @@ def markdown_to_html(markdown: str) -> str:
             part = part.replace('\n', '<br>')
             processed_parts.append(f'<p>{part}</p>')
 
-    return ''.join(processed_parts)
+    return escape_text_nodes(''.join(processed_parts))
 
 
-def parse_markdown_file(filepath: str) -> dict:
-    """Parse a markdown file and return structured data."""
+def parse_markdown_file(filepath: str, math_mode: str = 'latex') -> dict:
+    """Parse a markdown file and return structured data.
+
+    math_mode:
+        latex  - display math ($$..$$) -> latex_blocks[] for Insert > LaTeX;
+                 inline math ($..$) -> Unicode text. (default)
+        text   - every formula is flattened to Unicode text.
+        keep   - leave $..$ / $$..$$ verbatim in the HTML.
+        image  - leave formulas untouched (caller pre-rendered them to images).
+    """
     path = Path(filepath)
     base_path = path.parent
 
@@ -331,10 +536,25 @@ def parse_markdown_file(filepath: str) -> dict:
     # Extract title first (and remove H1 from markdown)
     title, content = extract_title(content)
 
-    # Extract images and dividers with block indices
-    images, dividers, clean_markdown, total_blocks = extract_images_and_dividers(content, base_path)
+    # --- math -------------------------------------------------------------
+    latex_sources: list[str] = []
+    if math_mode == 'image':
+        pass  # caller already replaced formulas with images
+    elif math_mode == 'keep':
+        pass  # leave the source delimiters alone
+    elif math_mode == 'text':
+        content = DISPLAY_MATH.sub(lambda m: latex_to_text(m.group(1)), content)
+        content = INLINE_MATH.sub(lambda m: latex_to_text(m.group(1)), content)
+    else:  # 'latex'
+        content, latex_sources = extract_display_math(content)
+        content = INLINE_MATH.sub(lambda m: latex_to_text(m.group(1)), content)
 
-    # Convert to HTML
+    # Extract images, dividers and display-math blocks with block indices
+    (images, dividers, latex_blocks,
+     clean_markdown, total_blocks) = extract_images_and_dividers(
+        content, base_path, latex_sources)
+
+    # Convert to HTML (text nodes are HTML-escaped there)
     html = markdown_to_html(clean_markdown)
 
     cover_image = images[0]["path"] if images else None
@@ -350,9 +570,11 @@ def parse_markdown_file(filepath: str) -> dict:
         "cover_image": cover_image,
         "cover_exists": cover_exists,
         "content_images": content_images,
+        "latex_blocks": latex_blocks,
         "dividers": dividers,
         "html": html,
         "total_blocks": total_blocks,
+        "math_mode": math_mode,
         "source_file": str(path.absolute()),
         "missing_images": len(missing)
     }
@@ -365,6 +587,9 @@ def main():
                        help='Output format (default: json)')
     parser.add_argument('--html-only', action='store_true',
                        help='Output only HTML content')
+    parser.add_argument('--math-mode', choices=['latex', 'text', 'keep', 'image'],
+                       default='latex',
+                       help='How to handle $..$ / $$..$$ (default: latex)')
 
     args = parser.parse_args()
 
@@ -372,7 +597,7 @@ def main():
         print(f"Error: File not found: {args.file}", file=sys.stderr)
         sys.exit(1)
 
-    result = parse_markdown_file(args.file)
+    result = parse_markdown_file(args.file, math_mode=args.math_mode)
 
     if args.html_only:
         print(result['html'])
